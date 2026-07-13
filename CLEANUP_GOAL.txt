@@ -1,0 +1,20 @@
+/goal Stabilize, simplify, and truth-check the existing Stream Reliability Lab v0.1 without adding user-facing features.
+
+Read AGENTS.md, PLAN.md, PROGRESS.md, DECISIONS.md, the README, tests, and current implementation.
+
+First run the documented full verification suite and primary demo to establish a baseline. Then delegate read-only reviews in parallel to `skeptical_reviewer`, `simplicity_critic`, and `test_engineer`. Wait for all reports, reproduce or validate each material finding, and create a ranked cleanup plan.
+
+Perform a focused cleanup that preserves behavior:
+
+- remove dead code, abandoned paths, stale configuration, and generated artifacts;
+- eliminate unnecessary dependencies and one-use abstractions where doing so improves clarity;
+- consolidate duplicated lifecycle, validation, persistence, and analytics logic;
+- improve failure messages, deterministic test setup, and weak assertions;
+- correct race conditions, database-state leakage, and unreliable retry/reconnect behavior;
+- ensure lifecycle and latency metrics match stored evidence;
+- reconcile README, diagrams, commands, and actual behavior;
+- document remaining non-production limitations honestly.
+
+Do not redesign the product, add integrations, add AI, move to cloud infrastructure, or chase speculative performance. Do not publish, push, deploy, or open a pull request.
+
+After changes, rerun the complete verification suite and primary demo from clean state. Stop when all checks pass, the quickstart is accurate, no verified critical/high review finding remains, and the codebase is materially simpler or more reliable than the baseline. Report exact commands, results, important removals/refactors, and remaining limitations.

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Python packaging and build output
+*.egg-info/
+build/
+dist/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local application data
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+*.log
+data/
+artifacts/
+reports/generated/
+
+# Playwright and test output
+test-results/
+playwright-report/
+blob-report/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Codex local logs/state
+.codex-log/
