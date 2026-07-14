@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Stream Reliability Lab Overlay</title>
+    <link rel="stylesheet" href="/static/overlay.css">
+  </head>
+  <body>
+    <main class="overlay-shell" aria-labelledby="overlay-title">
+      <header class="overlay-header">
+        <div>
+          <p class="eyebrow">Stream Reliability Lab</p>
+          <h1 id="overlay-title">Synthetic event overlay</h1>
+        </div>
+        <div class="connection-state" id="connection-state" data-state="connecting" role="status" aria-live="polite">
+          <span aria-hidden="true"></span>
+          <strong>Connecting</strong>
+        </div>
+      </header>
+      <section class="run-context" aria-label="Active run">
+        <span>Run</span>
+        <code id="run-id">Waiting for a run</code>
+      </section>
+      <section class="effect-feed" id="effect-feed" aria-live="polite" aria-label="Rendered synthetic effects">
+        <div class="empty-state" id="empty-state">
+          <strong>Ready for evidence</strong>
+          <span>Valid processed events will appear here once.</span>
+        </div>
+      </section>
+    </main>
+    <template id="effect-template">
+      <article class="effect-card">
+        <div class="effect-symbol" aria-hidden="true"></div>
+        <div class="effect-copy">
+          <div class="effect-meta"><span class="effect-type"></span><code class="effect-id"></code></div>
+          <strong class="effect-title"></strong>
+          <p class="effect-detail"></p>
+        </div>
+      </article>
+    </template>
+    <script src="/static/overlay.js" defer></script>
+  </body>
+</html>

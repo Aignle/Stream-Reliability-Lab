@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+*.duckdb
+artifacts
+data
+test-results
+playwright-report
