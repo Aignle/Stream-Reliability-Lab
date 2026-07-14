@@ -308,4 +308,5 @@ Checkpoint 9 complete - focused cleanup and reliability hardening.
 
 - Cleanup verification is complete; the verified cleanup is the repository's
   finalized v0.1 state.
-- No remote was configured and nothing was pushed, published, or deployed.
+- No remote was configured and nothing was pushed, published, or deployed
+  during the cleanup pass.

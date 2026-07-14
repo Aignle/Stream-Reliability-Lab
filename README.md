@@ -1,14 +1,28 @@
 # Stream Reliability Lab
 
+[![Checks](https://github.com/Aignle/Stream-Reliability-Lab/actions/workflows/checks.yml/badge.svg?branch=main)](https://github.com/Aignle/Stream-Reliability-Lab/actions/workflows/checks.yml)
+
 Stream Reliability Lab is a local reliability-testing and analytics platform
 for a small real-time event system. It generates deterministic synthetic
 creator events, injects delivery and connection faults, persists every observed
 attempt in DuckDB, renders idempotent effects in a browser overlay, and reports
 what actually reached each lifecycle stage.
 
-The v0.1 claim is deliberately narrow: **at-least-once source delivery with
-idempotent processing and browser effects**. It does not claim universal
-exactly-once delivery, production scale, or real platform integration.
+The v0.1 claim is deliberately narrow: **at-least-once source delivery,
+idempotent processing, and effectively-once visible browser effects**. It does
+not claim universal exactly-once delivery, production scale, or real platform
+integration.
+
+## v0.1 at a glance
+
+| | Evidence |
+| --- | --- |
+| Lifecycle | Deterministic simulator -> FastAPI WebSocket ingestion -> DuckDB evidence -> idempotent processing -> browser render acknowledgment -> Streamlit analytics |
+| Stack | Python 3.12, FastAPI, Pydantic, DuckDB, Streamlit, vanilla JavaScript, pytest, Playwright, Docker Compose, and GitHub Actions |
+| Fixed-seed proof | 500 generated events, 526 attempts, 490 unique processed and rendered effects, 26 duplicates, 10 intentionally rejected payloads, 0 operational delivery failures, and 0 identity conflicts |
+| Reconnect result | One accepted reply was unread when the old transport closed; the retry returned `duplicate`, with no unique event or visible-effect loss |
+| Run locally | Follow [local setup](#local-setup), then the [quick start](#quick-start) |
+| Validation | 55 core tests plus real Chromium, the fixed-seed 500-event scenario, and Docker restart persistence; GitHub Actions runs the same proof layers |
 
 ![Stream Reliability Lab dashboard](docs/images/dashboard-demo.png)
 
