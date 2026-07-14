@@ -10,7 +10,7 @@ import duckdb
 import pytest
 
 from streamlab.models import AttemptOutcome, ScenarioName
-from streamlab.repository import Repository
+from streamlab.repository import Repository, RunNotAcceptingDeliveriesError
 from streamlab.service import IngestService
 from streamlab.simulator import build_scenario
 
@@ -95,27 +95,36 @@ def test_concurrent_duplicate_delivery_is_idempotent(tmp_path) -> None:
         repository.create_run(config)
         service = IngestService(repository)
         raw = config.manifest[0].canonical_json()
-        barrier = Barrier(2)
+        worker_count = 8
+        ingest_barrier = Barrier(worker_count)
+        process_barrier = Barrier(worker_count)
 
         def deliver(connection: str):
-            barrier.wait()
+            ingest_barrier.wait()
             return service.ingest_text(raw, connection)
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(deliver, ("source-a", "source-b")))
+        connections = tuple(f"source-{index}" for index in range(worker_count))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            results = list(pool.map(deliver, connections))
 
-        assert {item.reply.status for item in results} == {
-            AttemptOutcome.ACCEPTED,
-            AttemptOutcome.DUPLICATE,
-        }
-        effects = [service.record_reply_and_process(item) for item in results]
+        statuses = [item.reply.status for item in results]
+        assert statuses.count(AttemptOutcome.ACCEPTED) == 1
+        assert statuses.count(AttemptOutcome.DUPLICATE) == worker_count - 1
+
+        def process(result):
+            process_barrier.wait()
+            return service.record_reply_and_process(result)
+
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            effects = list(pool.map(process, results))
+
         assert sum(effect is not None for effect in effects) == 1
         assert repository.query("SELECT COUNT(*) AS count FROM events")[0]["count"] == 1
         assert (
             repository.query("SELECT COUNT(*) AS count FROM delivery_attempts")[0][
                 "count"
             ]
-            == 2
+            == worker_count
         )
         assert (
             repository.query("SELECT COUNT(*) AS count FROM processing_attempts")[0][
@@ -123,6 +132,27 @@ def test_concurrent_duplicate_delivery_is_idempotent(tmp_path) -> None:
             ]
             == 1
         )
+        assert (
+            repository.query(
+                "SELECT COUNT(*) AS count FROM delivery_attempts "
+                "WHERE response_sent_at IS NOT NULL"
+            )[0]["count"]
+            == worker_count
+        )
+        canonical = repository.query(
+            "SELECT acknowledged_at, processed_at FROM events"
+        )[0]
+        assert canonical["acknowledged_at"] is not None
+        assert canonical["processed_at"] is not None
+        processing = repository.query(
+            "SELECT effect_id, outcome FROM processing_attempts"
+        )
+        assert processing == [
+            {
+                "effect_id": str(config.manifest[0].event_id),
+                "outcome": "success",
+            }
+        ]
     finally:
         repository.close()
 
@@ -300,5 +330,37 @@ def test_completion_cannot_rewrite_manifest_evidence(tmp_path) -> None:
             "client_acked_count": 2,
             "retry_count": 1,
         }
+    finally:
+        repository.close()
+
+
+def test_completed_run_rejects_every_new_delivery_outcome(tmp_path) -> None:
+    repository = Repository(tmp_path / "completed-deliveries.duckdb")
+    try:
+        config = _config(1)
+        repository.create_run(config)
+        repository.complete_run(RUN_ID, 1, 0, 0)
+        service = IngestService(repository)
+        changed = config.manifest[0].model_dump(mode="json")
+        changed["actor_id"] = "synthetic-actor-999"
+
+        for raw_payload in (
+            config.manifest[0].canonical_json(),
+            "{",
+            json.dumps(changed),
+        ):
+            with pytest.raises(
+                RunNotAcceptingDeliveriesError,
+                match="not accepting deliveries",
+            ):
+                service.ingest_text(raw_payload, "late-source", RUN_ID)
+
+        assert repository.query("SELECT COUNT(*) AS count FROM events")[0]["count"] == 0
+        assert (
+            repository.query("SELECT COUNT(*) AS count FROM delivery_attempts")[0][
+                "count"
+            ]
+            == 0
+        )
     finally:
         repository.close()

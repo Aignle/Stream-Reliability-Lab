@@ -119,6 +119,54 @@ jobs:
           assert latest["status"] == "completed"
           PY
 
+      - name: Prove persisted evidence survives API restart
+        run: |
+          docker compose restart api
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "API did not become healthy after restart" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker compose exec -T api python - <<'PY'
+          import json
+          import urllib.request
+
+          result = json.load(open("/tmp/compose-result.json", encoding="utf-8"))
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/runs/latest", timeout=5) as response:
+              latest = json.load(response)
+          with urllib.request.urlopen(
+              f"http://127.0.0.1:8000/api/runs/{latest['run_id']}/overview",
+              timeout=5,
+          ) as response:
+              overview = json.load(response)
+          assert latest["run_id"] == result["run_id"]
+          assert latest["scenario"] == "forced_reconnect"
+          assert latest["status"] == "completed"
+          assert overview["delivered"] == 13
+          assert overview["unique_events"] == 12
+          assert overview["acknowledged"] == 12
+          assert overview["processed"] == 12
+          assert overview["duplicates"] == 1
+          assert overview["processing_attempts"] == 12
+          assert overview["processing_attempt_successes"] == 12
+          assert overview["processing_attempt_failures"] == 0
+          assert overview["verdict"] == "incomplete"
+          PY
+          docker compose exec -T dashboard python - <<'PY'
+          import json
+          import urllib.request
+
+          with urllib.request.urlopen("http://api:8000/api/runs/latest", timeout=5) as response:
+              latest = json.load(response)
+          assert latest["scenario"] == "forced_reconnect"
+          assert latest["status"] == "completed"
+          PY
+
       - name: Show service logs after failure
         if: failure()
         run: docker compose logs --no-color

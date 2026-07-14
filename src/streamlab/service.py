@@ -151,21 +151,7 @@ class IngestService:
                 event_id=event.event_id,
                 run_id=event.run_id,
             )
-            return IngestResult(
-                reply=DeliveryReply(
-                    kind="nack",
-                    attempt_id=conflicted.attempt_id,
-                    status=AttemptOutcome.CONFLICT,
-                    event_id=conflicted.event_id,
-                    run_id=conflicted.run_id,
-                    persisted=False,
-                    error=ErrorDetail(
-                        category=ErrorCategory.EVENT_ID_CONFLICT,
-                        message=conflicted.error_message or "event_id conflict",
-                    ),
-                ),
-                persisted_delivery=conflicted,
-            )
+            return self._conflicted_result(conflicted)
 
         persisted = self.repository.persist_valid_delivery(
             raw_payload=raw_payload,
@@ -173,21 +159,7 @@ class IngestService:
             event=event,
         )
         if persisted.outcome is AttemptOutcome.CONFLICT:
-            return IngestResult(
-                reply=DeliveryReply(
-                    kind="nack",
-                    attempt_id=persisted.attempt_id,
-                    status=persisted.outcome,
-                    event_id=persisted.event_id,
-                    run_id=persisted.run_id,
-                    persisted=False,
-                    error=ErrorDetail(
-                        category=ErrorCategory.EVENT_ID_CONFLICT,
-                        message=persisted.error_message or "event_id conflict",
-                    ),
-                ),
-                persisted_delivery=persisted,
-            )
+            return self._conflicted_result(persisted)
         return IngestResult(
             reply=DeliveryReply(
                 kind="ack",
@@ -242,6 +214,24 @@ class IngestService:
                     message=rejected.error_message,
                 ),
             )
+        )
+
+    @staticmethod
+    def _conflicted_result(conflicted: PersistedDelivery) -> IngestResult:
+        return IngestResult(
+            reply=DeliveryReply(
+                kind="nack",
+                attempt_id=conflicted.attempt_id,
+                status=AttemptOutcome.CONFLICT,
+                event_id=conflicted.event_id,
+                run_id=conflicted.run_id,
+                persisted=False,
+                error=ErrorDetail(
+                    category=ErrorCategory.EVENT_ID_CONFLICT,
+                    message=conflicted.error_message or "event_id conflict",
+                ),
+            ),
+            persisted_delivery=conflicted,
         )
 
     @staticmethod

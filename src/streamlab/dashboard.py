@@ -49,6 +49,10 @@ def _format_number(value: object) -> str:
     return str(value)
 
 
+def _percentage(value: object) -> str:
+    return "Not measured" if value is None else f"{_format_number(value)}%"
+
+
 def _latency(value: object) -> str:
     return "Not measured" if value is None else f"{float(cast(float, value)):,.2f} ms"
 
@@ -108,7 +112,7 @@ def _overview_tab(overview: dict[str, Any]) -> None:
         )
         second.metric(
             "Payload-rejection rate",
-            f"{_format_number(overview['payload_rejection_rate_percent'])}%",
+            _percentage(overview["payload_rejection_rate_percent"]),
             help=str(overview["payload_rejection_rate_definition"]),
         )
         first.metric(
@@ -117,15 +121,15 @@ def _overview_tab(overview: dict[str, Any]) -> None:
         )
         second.metric(
             "Processing attempt success",
-            f"{_format_number(overview['processing_attempt_success_percent'])}%",
+            _percentage(overview["processing_attempt_success_percent"]),
         )
         first.metric(
             "Processing completion",
-            f"{_format_number(overview['processing_completion_percent'])}%",
+            _percentage(overview["processing_completion_percent"]),
         )
         second.metric(
             "Render completion",
-            f"{_format_number(overview['render_completion_percent'])}%",
+            _percentage(overview["render_completion_percent"]),
         )
         st.caption(
             f"Latency uses {overview['latency_definition']} and "

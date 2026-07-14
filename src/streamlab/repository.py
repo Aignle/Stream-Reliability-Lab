@@ -39,6 +39,10 @@ SUBMITTED_CONNECTION_EVENT_KINDS = {
 }
 
 
+class RunNotAcceptingDeliveriesError(RuntimeError):
+    """Raised when a source tries to mutate a completed run."""
+
+
 @dataclass(frozen=True, slots=True)
 class PersistedDelivery:
     """Result of atomically auditing and accepting one valid delivery."""
@@ -47,9 +51,7 @@ class PersistedDelivery:
     outcome: AttemptOutcome
     event_id: UUID
     run_id: UUID
-    persisted: bool
     duplicate: bool
-    error_category: ErrorCategory | None = None
     error_message: str | None = None
 
 
@@ -68,11 +70,11 @@ class Repository:
     """Serialized DuckDB writer and read-query boundary for the application."""
 
     def __init__(self, database_path: str | Path) -> None:
-        self.database_path = str(database_path)
-        if self.database_path != ":memory:":
-            Path(self.database_path).resolve().parent.mkdir(parents=True, exist_ok=True)
+        resolved_path = str(database_path)
+        if resolved_path != ":memory:":
+            Path(resolved_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._connection = duckdb.connect(self.database_path)
+        self._connection = duckdb.connect(resolved_path)
         self._connection.execute("SET TimeZone='UTC'")
         self._initialize_schema()
 
@@ -283,12 +285,36 @@ class Repository:
                 ],
             )
 
-    def run_exists(self, run_id: UUID) -> bool:
+    def run_status(self, run_id: UUID) -> str | None:
+        """Return the stored lifecycle status for a run, if it exists."""
         rows = self.query(
-            "SELECT 1 AS present FROM runs WHERE run_id = ?",
+            "SELECT status FROM runs WHERE run_id = ?",
             [str(run_id)],
         )
-        return bool(rows)
+        return str(rows[0]["status"]) if rows else None
+
+    def run_exists(self, run_id: UUID) -> bool:
+        return self.run_status(run_id) is not None
+
+    def _require_run_accepting_deliveries(
+        self,
+        run_id: UUID,
+        *,
+        allow_unknown: bool = False,
+    ) -> None:
+        """Enforce the source-delivery boundary inside the active transaction."""
+        row = self._connection.execute(
+            "SELECT status FROM runs WHERE run_id = ?",
+            [str(run_id)],
+        ).fetchone()
+        if row is None:
+            if allow_unknown:
+                return
+            raise KeyError(f"run {run_id} does not exist")
+        if str(row[0]) != "running":
+            raise RunNotAcceptingDeliveriesError(
+                f"run {run_id} is not accepting deliveries"
+            )
 
     def generated_event_hash(self, event_id: UUID, run_id: UUID) -> str | None:
         """Return the manifest envelope hash for an event in a run."""
@@ -363,6 +389,11 @@ class Repository:
         """Audit an invalid raw delivery without creating a canonical event."""
         attempt_id = uuid4()
         with self._transaction():
+            if run_id is not None:
+                self._require_run_accepting_deliveries(
+                    run_id,
+                    allow_unknown=True,
+                )
             self._connection.execute(
                 """
                 INSERT INTO delivery_attempts
@@ -403,6 +434,7 @@ class Repository:
         """Audit an event-identity conflict without mutating canonical state."""
         attempt_id = uuid4()
         with self._transaction():
+            self._require_run_accepting_deliveries(run_id)
             self._connection.execute(
                 """
                 INSERT INTO delivery_attempts
@@ -428,9 +460,7 @@ class Repository:
             outcome=AttemptOutcome.CONFLICT,
             event_id=event_id,
             run_id=run_id,
-            persisted=False,
             duplicate=False,
-            error_category=ErrorCategory.EVENT_ID_CONFLICT,
             error_message=error_message,
         )
 
@@ -448,6 +478,7 @@ class Repository:
         run_id = str(event.run_id)
         canonical_hash = event.canonical_hash()
         with self._transaction():
+            self._require_run_accepting_deliveries(event.run_id)
             existing = self._connection.execute(
                 "SELECT canonical_hash FROM events WHERE event_id = ?",
                 [event_id],
@@ -490,9 +521,7 @@ class Repository:
                     outcome=outcome,
                     event_id=event.event_id,
                     run_id=event.run_id,
-                    persisted=not conflict,
                     duplicate=not conflict,
-                    error_category=error_category,
                     error_message=error_message,
                 )
 
@@ -567,7 +596,6 @@ class Repository:
             outcome=AttemptOutcome.ACCEPTED,
             event_id=event.event_id,
             run_id=event.run_id,
-            persisted=True,
             duplicate=False,
         )
 

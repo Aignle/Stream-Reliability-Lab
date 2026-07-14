@@ -28,7 +28,7 @@ from streamlab.models import (
     RunCompleteRequest,
     ScenarioConfig,
 )
-from streamlab.repository import Repository
+from streamlab.repository import Repository, RunNotAcceptingDeliveriesError
 from streamlab.service import IngestService
 
 STATIC_DIRECTORY = Path(__file__).with_name("static")
@@ -94,26 +94,62 @@ class OverlayHub:
             "kind": "effect",
             "event": effect.model_dump(mode="json"),
         }
-        sent = await self.send_json(effect.run_id, session_id, payload)
+        async with self._guard:
+            connection = self._connections.get((effect.run_id, session_id))
+        if connection is None:
+            self.repository.record_dispatch(
+                event_id=effect.event_id,
+                session_id=session_id,
+                outcome="failed",
+                error_message="overlay WebSocket unavailable",
+            )
+            return False
+
+        async with connection.send_lock:
+            try:
+                await connection.websocket.send_json(payload)
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+            else:
+                self.repository.record_dispatch(
+                    event_id=effect.event_id,
+                    session_id=session_id,
+                    outcome="sent",
+                )
+                return True
+
+        await self.remove(connection)
         self.repository.record_dispatch(
             event_id=effect.event_id,
             session_id=session_id,
-            outcome="sent" if sent else "failed",
-            error_message=None if sent else "overlay WebSocket unavailable",
+            outcome="failed",
+            error_message="overlay WebSocket unavailable",
         )
-        return sent
+        return False
 
-    async def broadcast(self, effect: OverlayEffect) -> int:
+    async def record_render_ack(
+        self,
+        connection: OverlayConnection,
+        message: RenderAckMessage,
+    ) -> bool:
+        """Order render evidence after dispatch persistence for this session."""
+        async with connection.send_lock:
+            return self.repository.record_render_ack(
+                event_id=message.event_id,
+                session_id=connection.session_id,
+                rendered_at=message.rendered_at,
+            )
+
+    async def broadcast(self, effect: OverlayEffect) -> None:
         async with self._guard:
             session_ids = [
                 item.session_id
                 for item in self._connections.values()
                 if item.run_id == effect.run_id
             ]
-        outcomes = await asyncio.gather(
+        await asyncio.gather(
             *(self.send_effect(session_id, effect) for session_id in session_ids)
         )
-        return sum(outcomes)
 
 
 def _repository(app: FastAPI) -> Repository:
@@ -299,8 +335,12 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         run_id: UUID = Query(...),
         connection_id: str | None = Query(default=None, min_length=1, max_length=80),
     ) -> None:
-        if not _repository(application).run_exists(run_id):
+        run_status = _repository(application).run_status(run_id)
+        if run_status is None:
             await websocket.close(code=4404, reason="run not found")
+            return
+        if run_status != "running":
+            await websocket.close(code=4409, reason="run is not accepting deliveries")
             return
         await websocket.accept()
         active_connection_id = connection_id or str(uuid4())
@@ -325,6 +365,15 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                         active_connection_id,
                         run_id,
                     )
+                except RunNotAcceptingDeliveriesError:
+                    try:
+                        await websocket.close(
+                            code=4409,
+                            reason="run is not accepting deliveries",
+                        )
+                    except (RuntimeError, WebSocketDisconnect):
+                        pass
+                    break
                 except Exception as error:
                     logger.exception("Unexpected ingestion failure")
                     try:
@@ -427,10 +476,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                     )
                     continue
                 try:
-                    created = _repository(application).record_render_ack(
-                        event_id=render_ack.event_id,
-                        session_id=session_id,
-                        rendered_at=render_ack.rendered_at,
+                    created = await _hub(application).record_render_ack(
+                        connection,
+                        render_ack,
                     )
                 except ValueError as error:
                     await _hub(application).send_json(

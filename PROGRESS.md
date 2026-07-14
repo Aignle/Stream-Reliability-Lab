@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-Checkpoint 8 complete - finalization review remediation and release verification.
+Checkpoint 9 complete - focused cleanup and reliability hardening.
 
 ## Completed checkpoints
 
@@ -120,6 +120,23 @@ Checkpoint 8 complete - finalization review remediation and release verification
 - False-positive regressions cover forged server provenance, a late server
   disconnect, and failure -> recovery -> render evidence.
 
+### 9 - Cleanup and reliability hardening
+
+- The clean v0.1 baseline passed 52 core tests, Playwright, the fixed-seed
+  500-event scenario, Ruff, formatting, mypy, pip check, JavaScript syntax,
+  Compose validation, and Git whitespace checks before cleanup edits.
+- Independent simplicity, skeptical reliability, and test reviews completed
+  without editing the working tree.
+- Reproduced two mutable-evidence defects: post-completion source deliveries
+  could add attempts/events, and a fast render ACK could arrive before its
+  successful dispatch row committed.
+- Completed-run ingestion now closes at both the socket and transactional write
+  boundaries. Per-session ordering now covers effect send, successful dispatch
+  persistence, and render-ACK validation.
+- Targeted repository, WebSocket, dashboard, and deterministic browser tests
+  passed after each hardening group. The final full, scenario, and Docker proof
+  is recorded below.
+
 ## Final verification (2026-07-14)
 
 - `.venv\Scripts\python.exe -m pip install -e ".[dev]"` - passed.
@@ -230,6 +247,47 @@ Checkpoint 8 complete - finalization review remediation and release verification
 - `git diff --check` - passed with only LF-to-CRLF notices for the two tracked
   Markdown files.
 
+## Cleanup verification (2026-07-14)
+
+- Three independent final reviewers found no remaining P0, P1, or in-scope P2
+  issue after the cleanup changes. The final Playwright gate was made
+  asynchronous so slow browser operations cannot block the simulator event
+  loop or exhaust an unrelated shorter timeout.
+- `.venv\Scripts\python.exe -m pytest -q` - 55 passed, 2 deselected in
+  15.62s.
+- `.venv\Scripts\python.exe -m pytest -m e2e -q` - 1 passed, 56 deselected in
+  7.56s.
+- `.venv\Scripts\python.exe -m pytest -m scenario -q` - 1 passed, 56
+  deselected in 18.48s.
+- Fresh fixed-seed evidence from run
+  `77074044-a2ce-4f23-baa6-42d1de44116e`: 500 generated, 526 attempts, 490
+  accepted, 26 duplicate, 10 intentionally payload-rejected, 490 unique/
+  server-ACK-send/processed/dispatched/rendered, 490 successful and 0 failed
+  processing attempts, 0 operational ingestion failures, and 0 identity
+  conflicts. The scenario asserted 489 client-observed accepted replies, 26
+  duplicate replies, and one retry while reconciling all 490 unique IDs.
+- The reconnect target had one accepted reply-send on the old transport and one
+  duplicate reply-send on a distinct new transport. Exact canonical order
+  matched all 490 events with zero mismatches. Five server-timed 25 ms delays
+  measured 33.663-44.916 ms.
+- Persist-to-render p50/p95/p99 measured 27.324/38.565/42.880 ms from 490
+  samples; reconnect measured 13.934 ms and stored run duration was 13.136 s.
+  These remain local observations, not capacity claims.
+- Isolated Compose project `streamlab-cleanup-20260714` built and became
+  healthy on API port 8000 and dashboard port 8502. Its forced-reconnect run
+  retained the same run ID and all 13 attempts, 12 unique/ACK-sent/processed
+  events, one duplicate, 12 successful processing attempts, and zero failures
+  after API restart. Dashboard-to-API networking passed before and after the
+  restart. The scoped containers, network, volume, and image tags were removed.
+- `.venv\Scripts\python.exe -m ruff check .` - passed.
+- `.venv\Scripts\python.exe -m ruff format --check .` - 18 files already
+  formatted.
+- `.venv\Scripts\python.exe -m mypy src` - passed for 8 source files.
+- `.venv\Scripts\python.exe -m pip check` - no broken requirements.
+- `node --check src\streamlab\static\overlay.js` - passed.
+- `docker compose config --quiet` - passed.
+- `git diff --check` - passed.
+
 ## Known limitations
 
 - One FastAPI process owns one serialized DuckDB writer; this is not a
@@ -238,7 +296,9 @@ Checkpoint 8 complete - finalization review remediation and release verification
 - Browser acknowledgment proves DOM insertion, not OBS or physical display
   output.
 - Forced disconnects are client-controlled, not packet-level network faults.
-- Dependency ranges are bounded but there is no lock file yet.
+- Dependency ranges are bounded without a lockfile. The current pip/setuptools
+  toolchain has no native lock command, and cleanup did not add a second package
+  manager solely to generate one.
 
 ## Blockers
 
@@ -246,6 +306,6 @@ Checkpoint 8 complete - finalization review remediation and release verification
 
 ## Repository state
 
-- v0.1 verification is complete; cleanup work starts from a dedicated follow-up
-  branch after the requested local finalization commit.
+- Cleanup verification is complete; the verified cleanup is the repository's
+  finalized v0.1 state.
 - No remote was configured and nothing was pushed, published, or deployed.

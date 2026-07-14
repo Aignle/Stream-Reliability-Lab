@@ -68,6 +68,13 @@ def test_dashboard_renders_stored_run_metrics(live_server, monkeypatch) -> None:
         "Processing completion",
         "Render completion",
     } <= metric_labels
+    metric_values = {item.label: item.value for item in application.metric}
+    assert metric_values["Generated"] == "3"
+    assert metric_values["Delivered"] == "0"
+    assert metric_values["Payload-rejection rate"] == "Not measured"
+    assert metric_values["Processing attempt success"] == "Not measured"
+    assert metric_values["Processing completion"] == "Not measured"
+    assert metric_values["Render completion"] == "Not measured"
     assert application.tabs[0].label == "Overview"
     assert application.tabs[1].label == "Event lifecycle"
     assert application.tabs[2].label == "Performance"

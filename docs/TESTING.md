@@ -33,14 +33,17 @@ Playwright end-to-end test, fixed 500-event scenario, and Compose validation.
 | Persistence order | A second DuckDB connection sees event + attempt while ACK and processing timestamps are still null |
 | Transaction failure | Injected commit failure rolls back attempt and event and cannot produce an accepted result |
 | Idempotency | Barrier-concurrent duplicate service calls produce accepted + duplicate, one event, one processing effect |
+| Concurrent post-ingestion | Eight duplicate deliveries record reply evidence and race processing behind a second barrier while still creating one successful effect |
 | Recovery | A persisted event recovers exactly once after a crash between the ACK frame and post-send evidence |
 | Application restart | A second app lifespan recovers and replays persisted unprocessed work |
 | Render integrity | Unknown and undispatched IDs fail; per-session ACK is idempotent; one session does not suppress another |
+| Dispatch/render ordering | A paused low-level effect send makes a concurrent render ACK wait until successful dispatch evidence commits |
+| Completed-run boundary | Existing and new source sockets close with 4409 and create no late attempt after completion |
 | WebSocket protocol | A post-ACK processing failure cannot queue a contradictory NACK; unexpected ingestion failure is audited, closes with 1011, and retries on a new transport |
 | Evidence provenance | Public fault markers are simulator-owned; caller JSON cannot create server-observed socket connect/disconnect evidence |
 | Analytics | Stored ACK-send counts, payload-rejection rate, processing failures, exact configured order, exact percentile wiring, search, timeline, categorized failures, and neutral disconnection evidence derive from fixtures |
 | Dashboard | Streamlit AppTest covers empty and populated API-backed states; source boundary excludes DuckDB |
-| Playwright vertical | Real Uvicorn + Chromium prove source submission, overlay socket reconnect, later replay, stored render ACK, and DOM deduplication |
+| Playwright vertical | A deterministic delivery gate holds the real Uvicorn + Chromium path at one card, then proves overlay reconnect, replay, stored render ACK, and DOM deduplication |
 | 500-event scenario | Fixed seed reconciles 500 generated, fault attempts, 490 valid lifecycle completions, reconnect, and metrics |
 | Delay evidence | Backdated and post-delivery claims fail; server-stamped pre-delay markers pass only when marker-to-attempt duration meets the plan |
 
@@ -52,7 +55,9 @@ Playwright end-to-end test, fixed 500-event scenario, and Compose validation.
   counts rather than only the ACK status.
 - Browser tests wait for a second real WebSocket, use a new replay session to
   exercise in-document deduplication, assert one DOM card, and poll stored
-  dispatch and per-session render evidence.
+  dispatch and per-session render evidence. The simulator is explicitly gated
+  after its first accepted reply, so wall-clock scheduling cannot finish the
+  short run before the reconnect assertion.
 - Invalid event IDs are explicitly checked for zero DOM matches.
 - Scenario success reconciles stored lifecycle, server ACK sends, client-observed
   replies, each planned duplicate, transport-bound reconnect/recovery,
@@ -71,5 +76,6 @@ Playwright end-to-end test, fixed 500-event scenario, and Compose validation.
 GitHub Actions separates core quality, browser/scenario, and Compose jobs. The
 browser job installs Chromium explicitly. The Compose job builds both services,
 waits on health checks, runs a deterministic forced-reconnect lifecycle inside
-the API image, proves dashboard-to-API networking, prints logs on failure, and
-always tears down its disposable volume.
+the API image, restarts the API and proves persisted counts and processing
+idempotency remain unchanged, rechecks dashboard-to-API networking, prints logs
+on failure, and always tears down its disposable volume.

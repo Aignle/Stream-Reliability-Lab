@@ -65,16 +65,20 @@ dispatch tables preserve repeated work rather than overwriting it.
    audits malformed or invalid input against the socket's bound run.
 4. For a valid manifest event, the repository inserts the delivery attempt and
    canonical event in one transaction. The transaction commits before the ACK
-   object is sent.
+   object is sent. A completed run rejects new delivery evidence inside this
+   same transaction, so a source socket already open at completion cannot
+   mutate the final counts.
 5. After the socket send succeeds, the attempt reply time and event ACK time
    are stored. Processing then creates one successful effect. If ingestion
    instead raises unexpectedly, the API best-effort audits `INTERNAL_ERROR`,
    closes the socket with 1011, and leaves retry to the bounded source policy;
    it does not fabricate an unpersisted terminal NACK.
 6. The overlay hub sends the effect to matching live sessions and stores each
-   dispatch attempt.
-7. The browser inserts the DOM element, sends `render_ack`, and waits for the
-   API's persisted `render_acknowledged` response.
+   successful dispatch while holding that session's ordering lock.
+7. The browser inserts the DOM element and sends `render_ack`. Render-ACK
+   validation uses the same session lock, so it cannot run ahead of successful
+   dispatch persistence, then returns the persisted `render_acknowledged`
+   response.
 
 ## Recovery and replay
 

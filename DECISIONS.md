@@ -208,3 +208,46 @@ completion must not hide an unplanned processing failure.
 **Tradeoff:** The public endpoint is intentionally not a generic connection-log
 API, and a recovered processing fault remains a failed lab run rather than a
 PASS-with-warning result.
+
+### 2026-07-14 - Run completion closes source ingestion
+
+**Decision:** Recheck run status inside every attempt-writing transaction and
+reject new or already-open ingestion sockets once a run is completed. Events
+persisted while the run was open may still finish processing, dispatch, and
+render acknowledgment.
+
+**Reason:** A final verdict must not become PASS from late source work or flip
+back to FAIL after additional post-completion attempts. The transactional check
+orders a racing completion and delivery without relying on a stale route-level
+status query.
+
+**Tradeoff:** A source that keeps its socket open beyond completion receives a
+4409 close and must create a new run rather than append more evidence.
+
+### 2026-07-14 - Dispatch persistence orders render acknowledgments
+
+**Decision:** Hold the overlay session's send lock through the successful
+dispatch transaction, and validate render acknowledgments through the same
+ordering gate.
+
+**Reason:** A browser can receive and acknowledge an effect while the outbound
+send coroutine is still yielding. Without a shared gate, valid DOM evidence can
+be rejected just before its successful dispatch row commits.
+
+**Tradeoff:** Sends and render acknowledgments are serialized per browser
+session. Different sessions remain independent, which is sufficient for this
+single-process local lab.
+
+### 2026-07-14 - Keep bounded dependencies without adding a lock manager
+
+**Decision:** Retain the current direct dependencies and bounded ranges, and do
+not add a lockfile during cleanup.
+
+**Reason:** The repository uses pip 24.2 and setuptools, and that installed pip
+has no native lock command. Adding pip-tools, uv, or another manager solely to
+generate a lock would expand the maintenance surface. `httpx2` is imported by
+the installed Starlette TestClient, `httpx` is used at runtime, and `pytz` is a
+verified DuckDB requirement in the clean container build.
+
+**Tradeoff:** CI and Docker prove fresh resolution within the supported bounds,
+but transitive versions are not byte-for-byte reproducible across time.

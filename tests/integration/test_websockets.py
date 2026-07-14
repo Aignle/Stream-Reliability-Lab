@@ -1,5 +1,6 @@
 """Protocol-level ingestion and overlay WebSocket tests."""
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -8,8 +9,10 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from streamlab.main import create_app
-from streamlab.models import ScenarioName
+from streamlab.main import OverlayConnection, OverlayHub, create_app
+from streamlab.models import RenderAckMessage, ScenarioName
+from streamlab.repository import Repository
+from streamlab.service import IngestService
 from streamlab.simulator import build_scenario
 
 RUN_ID = UUID("55555555-5555-4555-8555-555555555555")
@@ -292,6 +295,150 @@ def test_ingest_to_overlay_and_stored_render_ack_vertical_slice(tmp_path) -> Non
 
         malformed_before = client.get(f"/api/runs/{RUN_ID}/failures").json()
         assert malformed_before["payload_rejection_categories"] == []
+
+
+def test_render_ack_waits_for_successful_dispatch_persistence(tmp_path) -> None:
+    repository = Repository(tmp_path / "render-ordering.duckdb")
+    try:
+        config = _config()
+        event = config.manifest[0]
+        repository.create_run(config)
+        result = IngestService(repository).ingest_text(
+            event.canonical_json(),
+            "render-order-source",
+            RUN_ID,
+        )
+        effect = IngestService(repository).record_reply_and_process(result)
+        assert effect is not None
+        session_id = "render-order-browser"
+        repository.open_overlay_session(session_id, RUN_ID)
+
+        class PausedWebSocket:
+            def __init__(self) -> None:
+                self.effect_sent = asyncio.Event()
+                self.release_send = asyncio.Event()
+
+            async def send_json(self, _payload: object) -> None:
+                self.effect_sent.set()
+                await self.release_send.wait()
+
+            async def close(
+                self,
+                code: int = 1000,
+                reason: str | None = None,
+            ) -> None:
+                del code, reason
+
+        async def prove_ordering() -> None:
+            socket = PausedWebSocket()
+            connection = OverlayConnection(
+                websocket=socket,  # type: ignore[arg-type]
+                run_id=RUN_ID,
+                session_id=session_id,
+            )
+            hub = OverlayHub(repository)
+            await hub.add(connection)
+            send_task = asyncio.create_task(hub.send_effect(session_id, effect))
+            await socket.effect_sent.wait()
+            ack_task = asyncio.create_task(
+                hub.record_render_ack(
+                    connection,
+                    RenderAckMessage(
+                        kind="render_ack",
+                        event_id=event.event_id,
+                        rendered_at=datetime.now(UTC),
+                    ),
+                )
+            )
+            await asyncio.sleep(0)
+            assert not ack_task.done()
+
+            socket.release_send.set()
+            assert await send_task is True
+            assert await ack_task is True
+
+        asyncio.run(prove_ordering())
+        assert repository.query("SELECT outcome FROM overlay_dispatches") == [
+            {"outcome": "sent"}
+        ]
+        assert (
+            repository.query("SELECT COUNT(*) AS count FROM render_acknowledgments")[0][
+                "count"
+            ]
+            == 1
+        )
+    finally:
+        repository.close()
+
+
+def test_completed_run_closes_ingest_sockets_without_mutating_evidence(
+    tmp_path,
+) -> None:
+    application = create_app(tmp_path / "completed-sockets.duckdb")
+    config = _config()
+    event = config.manifest[0]
+    with TestClient(application) as client:
+        assert (
+            client.post("/api/runs", json=config.model_dump(mode="json")).status_code
+            == 201
+        )
+        overlay_url = f"/ws/overlay?run_id={RUN_ID}&session_id=completed-browser"
+        source_url = f"/ws/ingest?connection_id=active-source&run_id={RUN_ID}"
+        with client.websocket_connect(overlay_url) as overlay:
+            assert overlay.receive_json()["kind"] == "overlay_ready"
+            with client.websocket_connect(source_url) as source:
+                source.send_text(event.canonical_json())
+                assert source.receive_json()["status"] == "accepted"
+                effect = overlay.receive_json()
+                assert effect["event"]["event_id"] == str(event.event_id)
+                overlay.send_json(
+                    {
+                        "kind": "render_ack",
+                        "event_id": str(event.event_id),
+                        "rendered_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+                assert overlay.receive_json()["kind"] == "render_acknowledged"
+                completion = client.post(
+                    f"/api/runs/{RUN_ID}/complete",
+                    json={
+                        "generated_count": 1,
+                        "client_acked_count": 1,
+                        "retry_count": 0,
+                    },
+                )
+                assert completion.status_code == 200
+                before = client.get(f"/api/runs/{RUN_ID}/overview").json()
+                assert before["verdict"] == "pass"
+
+                source.send_text(event.canonical_json())
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    source.receive_json()
+                assert closed.value.code == 4409
+
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with client.websocket_connect(
+                    f"/ws/ingest?connection_id=late-source&run_id={RUN_ID}"
+                ):
+                    pass
+            assert refused.value.code == 4409
+
+        after = client.get(f"/api/runs/{RUN_ID}/overview").json()
+        for key in (
+            "delivered",
+            "unique_events",
+            "acknowledged",
+            "processed",
+            "dispatched",
+            "rendered",
+            "duplicates",
+            "payload_rejections",
+            "conflicts",
+            "verdict",
+        ):
+            assert after[key] == before[key]
+        assert after["delivered"] == 1
+        assert after["verdict"] == "pass"
 
 
 def test_ingest_socket_rejects_event_bound_to_another_run(tmp_path) -> None:

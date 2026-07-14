@@ -53,6 +53,9 @@ while retaining the same payload and injection semantics.
 Every ingestion WebSocket requires `run_id` in its query string. The server
 attributes all attempt evidence to that registered bound run and rejects a
 different payload `run_id` as `RUN_ID_MISMATCH` before full schema validation.
+Once the run is completed, a new ingestion socket is closed with code `4409`.
+An already-open source socket receives the same close if it submits more work;
+the transactional persistence boundary creates no late attempt or event row.
 
 Accepted first delivery:
 

@@ -39,6 +39,10 @@ not expected to equal generated or delivered counts in fault scenarios.
    redirect rejected-attempt evidence to another run.
 10. Client-submitted fault markers cannot claim server provenance or create
     server-observed socket connect/disconnect evidence.
+11. Run completion closes source ingestion atomically; no later delivery
+    outcome can change finalized event or attempt counts.
+12. A render acknowledgment is validated only after the matching successful
+    dispatch has committed for that overlay session.
 
 ## Failure boundaries
 
@@ -85,11 +89,22 @@ Processing still completes. When a browser connects, the service replays
 processed effects lacking an acknowledgment for that session. Analytics call
 the run `incomplete` until browser evidence exists.
 
+### Source sends after run completion
+
+The API refuses new ingestion sockets for completed runs. If a source socket
+was already open, every attempt-writing transaction rechecks the run status and
+closes that socket without storing a late valid, invalid, duplicate, or
+conflicting attempt. Events persisted before completion may still finish their
+processing and render lifecycle.
+
 ### Overlay reconnects
 
 The in-document `event_id` set suppresses duplicate DOM insertion during a
 socket reconnect. A full page load creates a new run-scoped session and receives
 its own replay, which makes the visible page complete rather than blank.
+Effect send and successful-dispatch persistence share a per-session ordering
+gate with render-ACK validation, preventing a fast browser response from being
+rejected merely because dispatch evidence had not committed yet.
 
 ## Sequence evidence
 

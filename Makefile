@@ -1,4 +1,4 @@
-PYTHON ?= python3
+PYTHON ?= python
 
 .PHONY: install browser-install run-api run-dashboard demo test test-unit test-integration test-e2e test-scenario lint format typecheck deps-check js-check check verify compose-up compose-down compose-check
 

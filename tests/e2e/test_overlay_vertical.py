@@ -5,20 +5,22 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from uuid import uuid4
 
 import httpx
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from streamlab.models import ScenarioName
-from streamlab.simulator import build_scenario, run_scenario
+from streamlab.models import AttemptOutcome, ScenarioName
+from streamlab.simulator import ScenarioRunner, build_scenario, run_scenario
 
 
 @pytest.mark.e2e
 def test_reconnect_retry_render_ack_and_dom_deduplication(
     live_server,
     tmp_path,
+    monkeypatch,
 ) -> None:
     api_url, ws_url = live_server
     config = build_scenario(
@@ -41,6 +43,27 @@ def test_reconnect_retry_render_ack_and_dom_deduplication(
         if str(by_sequence[sequence].event_id) not in invalid_ids
     )
     console_errors: list[str] = []
+    first_accepted_reply = Event()
+    resume_delivery = Event()
+    original_delivery = ScenarioRunner._deliver_with_retry
+
+    async def gated_delivery(runner, client, socket, connection_id, raw_payload):
+        result = await original_delivery(
+            runner,
+            client,
+            socket,
+            connection_id,
+            raw_payload,
+        )
+        if (
+            result[2].status is AttemptOutcome.ACCEPTED
+            and not first_accepted_reply.is_set()
+        ):
+            first_accepted_reply.set()
+            await asyncio.to_thread(resume_delivery.wait)
+        return result
+
+    monkeypatch.setattr(ScenarioRunner, "_deliver_with_retry", gated_delivery)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
@@ -97,43 +120,61 @@ def test_reconnect_retry_render_ack_and_dom_deduplication(
                     else None
                 ),
             )
-            page.goto(f"{api_url}/overlay?run_id={config.run_id}")
-            expect(page.locator("#connection-state strong")).to_have_text(
-                "Connected",
-                timeout=10_000,
-            )
-            cards = page.locator("[data-event-id]")
-            expect(
-                page.locator(f'[data-event-id="{first_delivered_valid.event_id}"]')
-            ).to_have_count(1, timeout=10_000)
-            evidence_deadline = time.monotonic() + 5
-            while time.monotonic() < evidence_deadline:
-                before_reconnect_evidence = httpx.get(
-                    f"{api_url}/api/runs/{config.run_id}/events/"
-                    f"{first_delivered_valid.event_id}",
-                    timeout=1,
-                ).json()
-                if before_reconnect_evidence["render_acknowledgments"]:
-                    break
-                time.sleep(0.02)
-            else:
-                pytest.fail("first browser render acknowledgment was not stored")
-            cards_before_reconnect = cards.count()
-            assert 0 < cards_before_reconnect < expected_valid
-            page.evaluate(
-                "window.__streamlabTestSocket.close(4000, 'playwright reconnect proof')"
-            )
-            page.wait_for_function(
-                """
-                window.__streamlabTestSockets.length >= 2 &&
-                window.__streamlabTestSockets.at(-1).readyState === WebSocket.OPEN
-                """,
-                timeout=10_000,
-            )
-            expect(page.locator("#connection-state strong")).to_have_text(
-                "Connected",
-                timeout=10_000,
-            )
+            try:
+                page.goto(f"{api_url}/overlay?run_id={config.run_id}")
+                expect(page.locator("#connection-state strong")).to_have_text(
+                    "Connected",
+                    timeout=10_000,
+                )
+                cards = page.locator("[data-event-id]")
+                expect(
+                    page.locator(f'[data-event-id="{first_delivered_valid.event_id}"]')
+                ).to_have_count(1, timeout=10_000)
+                evidence_deadline = time.monotonic() + 5
+                while time.monotonic() < evidence_deadline:
+                    before_reconnect_evidence = httpx.get(
+                        f"{api_url}/api/runs/{config.run_id}/events/"
+                        f"{first_delivered_valid.event_id}",
+                        timeout=1,
+                    ).json()
+                    if before_reconnect_evidence["render_acknowledgments"]:
+                        break
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("first browser render acknowledgment was not stored")
+                assert first_accepted_reply.is_set()
+                cards_before_reconnect = cards.count()
+                assert cards_before_reconnect == 1
+                page.evaluate(
+                    "window.__streamlabTestSocket.close(4000, "
+                    "'playwright reconnect proof')"
+                )
+                page.wait_for_function(
+                    """
+                    window.__streamlabTestSockets.length >= 2 &&
+                    window.__streamlabTestSockets.at(-1).readyState === WebSocket.OPEN
+                    """,
+                    timeout=10_000,
+                )
+                expect(page.locator("#connection-state strong")).to_have_text(
+                    "Connected",
+                    timeout=10_000,
+                )
+                replay_deadline = time.monotonic() + 5
+                while time.monotonic() < replay_deadline:
+                    replay_evidence = httpx.get(
+                        f"{api_url}/api/runs/{config.run_id}/events/"
+                        f"{first_delivered_valid.event_id}",
+                        timeout=1,
+                    ).json()
+                    if len(replay_evidence["render_acknowledgments"]) == 2:
+                        break
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("replayed browser render acknowledgment was not stored")
+                assert cards.count() == 1
+            finally:
+                resume_delivery.set()
             result = future.result(timeout=30)
             assert result.completed
 

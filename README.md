@@ -21,6 +21,8 @@ exactly-once delivery, production scale, or real platform integration.
   `reconnect_burst`.
 - A valid unique event and its delivery attempt commit before an accepted ACK
   is sent.
+- Completing a run closes its source-ingestion boundary. New valid, invalid,
+  duplicate, or conflicting attempts cannot mutate finalized evidence.
 - Duplicate attempts remain visible as evidence but create one canonical event,
   one successful processing effect, and one DOM element per browser session.
 - Invalid inputs receive structured NACKs, remain auditable, and never become
@@ -34,7 +36,8 @@ exactly-once delivery, production scale, or real platform integration.
   target on the old transport, deliberately not observed by the client, and
   retried as a duplicate on the distinct reconnected transport.
 - The browser sends a render acknowledgment only after inserting an element
-  carrying `data-event-id`; the API stores that acknowledgment.
+  carrying `data-event-id`; the API orders that acknowledgment after stored
+  successful-dispatch evidence.
 - Streamlit reads analytics through FastAPI only. FastAPI is the sole DuckDB
   owner and writer.
 
@@ -67,6 +70,8 @@ from durable evidence. See [architecture](docs/ARCHITECTURE.md), the
 - GNU Make is optional; every target is shown as a Python command below
 
 No credentials, tokens, real usernames, or private stream data are required.
+Make targets use `python` from the activated environment; override `PYTHON`
+only when your local interpreter command differs.
 
 ## Local setup
 
@@ -212,10 +217,10 @@ Chromium 149.0.7827.55. This is one local observation, not a capacity claim.
 | Reconnects / client retries | 1 / 1 |
 | Correlated reconnect target | Old reply sent but not observed; retry duplicate |
 | Planned / observed delay injections | 5 / 5 |
-| Reconnect duration | 14.109 ms |
-| Persist-to-render p50 / p95 / p99 | 28.197 / 38.658 / 45.781 ms |
+| Reconnect duration | 13.934 ms |
+| Persist-to-render p50 / p95 / p99 | 27.324 / 38.565 / 42.880 ms |
 | Latency sample count | 490 |
-| Stored run duration | 13.337 s |
+| Stored run duration | 13.136 s |
 | Final verdict | `pass` |
 
 The reconnect counts intentionally use two viewpoints. The server persisted and
@@ -236,14 +241,16 @@ fixed-seed scenario's overlay and dashboard surfaces:
 - `GET /health`
 - `POST /api/runs`
 - `POST /api/runs/{run_id}/complete`
+- `POST /api/runs/{run_id}/connection-events` for bounded simulator fault markers
 - `GET /api/runs`
+- `GET /api/runs/latest`
 - `GET /api/runs/{run_id}/overview`
 - `GET /api/runs/{run_id}/events`
 - `GET /api/runs/{run_id}/events/{event_id}`
 - `GET /api/runs/{run_id}/performance`
 - `GET /api/runs/{run_id}/failures`
-- `WS /ws/ingest?run_id={run_id}`
-- `WS /ws/overlay`
+- `WS /ws/ingest?run_id={run_id}&connection_id={optional_connection_id}`
+- `WS /ws/overlay?run_id={run_id}&session_id={session_id}`
 
 FastAPI also exposes local interactive schema documentation at
 <http://127.0.0.1:8000/docs>.
@@ -264,8 +271,9 @@ FastAPI also exposes local interactive schema documentation at
   a capture device.
 - The deterministic logical `occurred_at` timestamps are not used for runtime
   latency. Runtime metrics use persisted evidence timestamps.
-- Dependency ranges are bounded but the project does not yet maintain a lock
-  file for byte-for-byte environment reproduction.
+- Dependency ranges are bounded, but the pip/setuptools workflow used by v0.1
+  has no native cross-platform lock command. Clean CI and Docker installs test
+  those bounds; exact transitive versions are not byte-for-byte reproducible.
 
 ## Documentation
 

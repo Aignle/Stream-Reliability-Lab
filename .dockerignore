@@ -6,6 +6,10 @@
 .ruff_cache
 __pycache__
 *.pyc
+*.egg-info
+build
+dist
+reports
 .env
 .env.*
 !.env.example
