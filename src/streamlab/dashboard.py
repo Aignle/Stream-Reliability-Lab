@@ -50,24 +50,78 @@ def _format_number(value: object) -> str:
 
 
 def _percentage(value: object) -> str:
-    return "Not measured" if value is None else f"{_format_number(value)}%"
+    if value is None:
+        return "Not measured"
+    numeric = float(cast(float, value))
+    return f"{numeric:,.0f}%" if numeric.is_integer() else f"{numeric:,.2f}%"
 
 
 def _latency(value: object) -> str:
     return "Not measured" if value is None else f"{float(cast(float, value)):,.2f} ms"
 
 
+def _run_story(overview: dict[str, Any]) -> str:
+    """Summarize the stored lifecycle as one readable progression."""
+    stages = (
+        ("generated", "generated"),
+        ("delivered", "attempts"),
+        ("payload_rejections", "rejected"),
+        ("unique_events", "unique"),
+        ("processed", "processed"),
+        ("rendered", "rendered"),
+    )
+    return " → ".join(
+        f"{_format_number(overview[key])} {label}" for key, label in stages
+    )
+
+
+def _reconnect_story(overview: dict[str, Any]) -> str | None:
+    """Explain forced-reconnect evidence without inventing client reply counts."""
+    checks = cast(dict[str, Any], overview.get("scenario_checks", {}))
+    check = cast(dict[str, Any], checks.get("forced_reconnect", {}))
+    if not check.get("required"):
+        return None
+
+    old_transport_ack = int(check.get("accepted_reply_sent_on_forced_transport") or 0)
+    new_transport_duplicate = int(
+        check.get("duplicate_reply_sent_on_reconnected_transport") or 0
+    )
+    correlated = bool(check.get("attempt_path_correlated"))
+    if old_transport_ack != 1 or new_transport_duplicate != 1 or not correlated:
+        return (
+            "Reconnect proof is incomplete: the stored accepted-reply and "
+            "duplicate-retry path does not fully correlate across transports."
+        )
+
+    unique_events = int(overview["unique_events"])
+    client_acked_unique = int(overview["client_acked_unique"])
+    rendered = int(overview["rendered"])
+    story = (
+        "The server sent the reconnect target's accepted reply on the old "
+        "transport, but the simulator intentionally did not observe it. The "
+        "retry on the new transport returned duplicate. "
+        f"The client reconciled {client_acked_unique:,} of {unique_events:,} "
+        "unique event IDs."
+    )
+    if client_acked_unique == unique_events and rendered == unique_events:
+        return f"{story} All {rendered:,} reached stored browser render evidence."
+    if rendered < unique_events:
+        return (
+            f"{story} Browser proof is still incomplete: {rendered:,} of "
+            f"{unique_events:,} have stored render evidence."
+        )
+    return story
+
+
 def _metric_row(overview: dict[str, Any]) -> None:
-    columns = st.columns(6)
+    columns = st.columns(4)
     for column, (label, key) in zip(
         columns,
         (
-            ("Generated", "generated"),
-            ("Delivered", "delivered"),
-            ("Valid", "valid_deliveries"),
-            ("Unique", "unique_events"),
+            ("Delivery attempts", "delivered"),
+            ("Canonical events", "unique_events"),
             ("Processed", "processed"),
-            ("Rendered", "rendered"),
+            ("DOM-acknowledged", "rendered"),
         ),
         strict=True,
     ):
@@ -76,77 +130,98 @@ def _metric_row(overview: dict[str, Any]) -> None:
 
 def _overview_tab(overview: dict[str, Any]) -> None:
     verdict = str(overview["verdict"])
+    verdict_text = (
+        f"**{verdict.title()} · {overview['scenario']} · seed {overview['seed']}**\n\n"
+        f"{overview['verdict_reason']}"
+    )
+    if verdict == "pass":
+        st.success(verdict_text)
+    elif verdict == "fail":
+        st.error(verdict_text)
+    else:
+        st.warning(verdict_text)
+
+    st.subheader("One run, end to end")
     st.markdown(
-        f"<div class='verdict verdict-{verdict}'><span>Run verdict</span>"
-        f"<strong>{verdict.upper()}</strong><p>{overview['verdict_reason']}</p></div>",
+        f"<p class='run-story'>{_run_story(overview)}</p>",
         unsafe_allow_html=True,
     )
+    st.caption("Each step comes from stored API evidence for the selected run.")
     _metric_row(overview)
 
-    left, right = st.columns((1.25, 1))
+    left, right = st.columns((1.1, 1))
     with left:
-        st.subheader("Lifecycle funnel")
-        funnel = [
-            {"stage": "Generated", "events": overview["generated"]},
-            {"stage": "Unique", "events": overview["unique_events"]},
-            {"stage": "Server ACK sent", "events": overview["acknowledged"]},
-            {"stage": "Processed", "events": overview["processed"]},
-            {"stage": "Dispatched", "events": overview["dispatched"]},
-            {"stage": "Rendered", "events": overview["rendered"]},
-        ]
-        st.bar_chart(
-            funnel,
-            x="stage",
-            y="events",
-            horizontal=True,
-            sort=False,
+        st.subheader("Reliability evidence")
+        operational_failures = _format_number(overview["operational_delivery_failures"])
+        st.markdown(
+            "\n".join(
+                (
+                    f"- **{_format_number(overview['duplicates'])}** duplicate "
+                    "attempts — no second canonical event or processing effect",
+                    f"- **{_format_number(overview['payload_rejections'])}** "
+                    "payload-rejected attempts — "
+                    f"{_percentage(overview['payload_rejection_rate_percent'])}",
+                    f"- **{_format_number(overview['conflicts'])}** identity conflicts",
+                    f"- **{operational_failures}** operational ingestion failures",
+                    f"- **{_percentage(overview['processing_completion_percent'])}** "
+                    "processing completion · "
+                    f"**{_percentage(overview['render_completion_percent'])}** "
+                    "render completion",
+                    "- Browser replay deduplication is verified within one "
+                    "browser document across an overlay reconnect in the "
+                    "Playwright path.",
+                )
+            )
         )
     with right:
-        st.subheader("Reliability summary")
-        first, second = st.columns(2)
-        first.metric("Duplicate attempts", _format_number(overview["duplicates"]))
-        second.metric("Identity conflicts", _format_number(overview["conflicts"]))
-        first.metric(
-            "Payload rejections",
-            _format_number(overview["payload_rejections"]),
-        )
-        second.metric(
-            "Payload-rejection rate",
-            _percentage(overview["payload_rejection_rate_percent"]),
-            help=str(overview["payload_rejection_rate_definition"]),
-        )
-        first.metric(
-            "Operational ingestion failures",
-            _format_number(overview["operational_delivery_failures"]),
-        )
-        second.metric(
-            "Processing attempt success",
-            _percentage(overview["processing_attempt_success_percent"]),
-        )
-        first.metric(
-            "Processing completion",
-            _percentage(overview["processing_completion_percent"]),
-        )
-        second.metric(
-            "Render completion",
-            _percentage(overview["render_completion_percent"]),
-        )
-        st.caption(
-            f"Latency uses {overview['latency_definition']} and "
-            f"{overview['latency_sample_count']:,} stored samples."
+        st.subheader("Timing")
+        if overview["p50_latency_ms"] is None:
+            st.info(
+                "Persist-to-DOM-ACK latency is not measured until a browser responds."
+            )
+        else:
+            st.markdown(
+                f"**Persist → DOM ACK:** {_latency(overview['p50_latency_ms'])} "
+                f"median · {_latency(overview['p95_latency_ms'])} p95 · "
+                f"{_latency(overview['p99_latency_ms'])} p99"
+            )
+            st.caption(
+                f"{overview['latency_sample_count']:,} stored samples · "
+                f"{overview['latency_definition']}"
+            )
+        reconnect_duration = overview["reconnection"]["duration_ms"]
+        if reconnect_duration is not None:
+            st.markdown(
+                f"**Reconnect marker interval:** {_latency(reconnect_duration)}"
+            )
+
+    reconnect_story = _reconnect_story(overview)
+    if reconnect_story is not None:
+        st.subheader("Reconnect evidence")
+        if reconnect_story.startswith("Reconnect proof is incomplete"):
+            st.warning(reconnect_story)
+        else:
+            st.info(reconnect_story)
+
+    with st.expander("Metric definitions"):
+        st.markdown(
+            "\n".join(
+                (
+                    "- **Payload-rejection rate:** "
+                    f"{overview['payload_rejection_rate_definition']}",
+                    "- **Processing attempt success:** "
+                    f"{_percentage(overview['processing_attempt_success_percent'])}",
+                    "- **Processing completion:** "
+                    f"{_percentage(overview['processing_completion_percent'])}",
+                    "- **Render completion:** "
+                    f"{_percentage(overview['render_completion_percent'])}",
+                    "- Configured event rates are simulator pacing settings, not "
+                    "measured throughput.",
+                )
+            )
         )
 
-    st.subheader("End-to-end latency")
-    p50, p95, p99, reconnect = st.columns(4)
-    p50.metric("p50", _latency(overview["p50_latency_ms"]))
-    p95.metric("p95", _latency(overview["p95_latency_ms"]))
-    p99.metric("p99", _latency(overview["p99_latency_ms"]))
-    reconnect.metric(
-        "Reconnect duration",
-        _latency(overview["reconnection"]["duration_ms"]),
-    )
-
-    with st.expander("Run configuration and recovery evidence"):
+    with st.expander("Technical run evidence"):
         st.json(
             {
                 "scenario": overview["scenario"],
@@ -202,6 +277,7 @@ def _events_tab(run_id: str) -> None:
     }
     selected_label = st.selectbox("Inspect one event timeline", choices)
     selected_id = choices[selected_label]
+    st.caption(f"Selected event `{selected_id}`")
     evidence = api_get(f"/api/runs/{run_id}/events/{selected_id}")
     st.dataframe(
         evidence["timeline"],
@@ -249,13 +325,14 @@ def _performance_tab(run_id: str) -> None:
         x="range",
         y="count",
     )
-    comparison_a, comparison_b = st.columns(2)
-    with comparison_a:
-        st.markdown("**Normal traffic vs burst**")
-        st.json(performance["burst_comparison"])
-    with comparison_b:
-        st.markdown("**Before vs after reconnect**")
-        st.json(performance["reconnection_comparison"])
+    with st.expander("Technical traffic comparisons"):
+        comparison_a, comparison_b = st.columns(2)
+        with comparison_a:
+            st.markdown("**Normal traffic vs burst**")
+            st.json(performance["burst_comparison"])
+        with comparison_b:
+            st.markdown("**Before vs after reconnect**")
+            st.json(performance["reconnection_comparison"])
 
 
 def _failure_section(title: str, items: list[dict[str, Any]], empty: str) -> None:
@@ -320,19 +397,19 @@ def _style() -> None:
     st.markdown(
         """
         <style>
-          .block-container {max-width: 1380px; padding-top: 2.2rem;}
-          [data-testid="stMetric"] {background: #111722; border: 1px solid #293244;
-            border-radius: 14px; padding: 14px 16px;}
-          .verdict {display: grid; grid-template-columns: 1fr auto; gap: 4px 24px;
-            margin: 0 0 20px; padding: 18px 20px; border: 1px solid #293244;
-            border-radius: 16px; background: #111722;}
-          .verdict span {color: #95a2b6; font-size: 12px; letter-spacing: .1em;
-            text-transform: uppercase;}
-          .verdict strong {grid-row: span 2; align-self: center; color: #f2bd68;
-            font-size: 22px; letter-spacing: .06em;}
-          .verdict p {margin: 0; color: #c8d0dc;}
-          .verdict-pass strong {color: #72d99f;}
-          .verdict-fail strong {color: #ff8f8f;}
+          .block-container {max-width: 1180px; padding-top: 1.8rem;}
+          [data-testid="stMetric"] {background: transparent; border: 0;
+            border-bottom: 1px solid rgba(128, 139, 158, .28);
+            border-radius: 0; padding: .25rem 0 .8rem;}
+          .run-story {font-size: clamp(1.08rem, 2.1vw, 1.5rem);
+            font-weight: 650; line-height: 1.55; margin: -.2rem 0 .1rem;
+            overflow-wrap: anywhere;}
+          code {font-variant-ligatures: none;}
+          :focus-visible {outline: 3px solid #5fa8ff; outline-offset: 2px;}
+          @media (max-width: 700px) {
+            .block-container {padding: 1rem 1rem 2rem;}
+            .run-story {font-size: 1rem; line-height: 1.65;}
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -347,9 +424,7 @@ def main() -> None:
     )
     _style()
     st.title("Stream Reliability Lab")
-    st.caption(
-        "Stored lifecycle evidence for deterministic, synthetic WebSocket scenarios."
-    )
+    st.caption("What reached the browser after retries, rejection, and reconnects?")
     try:
         runs_payload = api_get("/api/runs", {"limit": 200})
         runs = cast(list[dict[str, Any]], runs_payload["runs"])
@@ -373,9 +448,10 @@ def main() -> None:
     }
     selected_label = st.selectbox("Run", labels)
     run_id = labels[selected_label]
+    st.caption(f"Run ID `{run_id}`")
     try:
         overview = api_get(f"/api/runs/{run_id}/overview")
-        tabs = st.tabs(("Overview", "Event lifecycle", "Performance", "Failures"))
+        tabs = st.tabs(("Run story", "Event trail", "Timing", "Exceptions"))
         with tabs[0]:
             _overview_tab(overview)
         with tabs[1]:

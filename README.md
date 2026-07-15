@@ -2,92 +2,120 @@
 
 [![Checks](https://github.com/Aignle/Stream-Reliability-Lab/actions/workflows/checks.yml/badge.svg?branch=main)](https://github.com/Aignle/Stream-Reliability-Lab/actions/workflows/checks.yml)
 
-Stream Reliability Lab is a local reliability-testing and analytics platform
-for a small real-time event system. It generates deterministic synthetic
-creator events, injects delivery and connection faults, persists every observed
-attempt in DuckDB, renders idempotent effects in a browser overlay, and reports
-what actually reached each lifecycle stage.
+I built Stream Reliability Lab to answer one question: after retries,
+disconnects, and rejected payloads, what actually reached the browser?
 
-The v0.1 claim is deliberately narrow: **at-least-once source delivery,
-idempotent processing, and effectively-once visible browser effects**. It does
-not claim universal exactly-once delivery, production scale, or real platform
-integration.
+It is a local, deterministic test lab for a small real-time event system. The
+simulator sends synthetic creator events through FastAPI and WebSockets, the API
+records their lifecycle in DuckDB, a browser overlay acknowledges DOM insertion,
+and a Streamlit dashboard tells the story from stored evidence.
 
-## v0.1 at a glance
+**Fixed-seed run:** 500 generated → 526 delivery attempts → 10 intentionally
+rejected → 490 canonical events → 490 processed → 490 browser render ACKs.
 
-| | Evidence |
-| --- | --- |
-| Lifecycle | Deterministic simulator -> FastAPI WebSocket ingestion -> DuckDB evidence -> idempotent processing -> browser render acknowledgment -> Streamlit analytics |
-| Stack | Python 3.12, FastAPI, Pydantic, DuckDB, Streamlit, vanilla JavaScript, pytest, Playwright, Docker Compose, and GitHub Actions |
-| Fixed-seed proof | 500 generated events, 526 attempts, 490 unique processed and rendered effects, 26 duplicates, 10 intentionally rejected payloads, 0 operational delivery failures, and 0 identity conflicts |
-| Reconnect result | One accepted reply was unread when the old transport closed; the retry returned `duplicate`, with no unique event or visible-effect loss |
-| Run locally | Follow [local setup](#local-setup), then the [quick start](#quick-start) |
-| Validation | 55 core tests plus real Chromium, the fixed-seed 500-event scenario, and Docker restart persistence; GitHub Actions runs the same proof layers |
+[Run it locally](#run-it) · [Inspect the evidence](#what-happened) ·
+[Read the failure case](#failure-case) · [See the validation](#how-i-verified-it)
 
 ![Stream Reliability Lab dashboard](docs/images/dashboard-demo.png)
 
-## What is proved
+The v0.1 claim is deliberately narrow: **at-least-once source delivery,
+idempotent processing, and effectively-once visible effects within one browser
+document**. It does not claim universal exactly-once delivery, production scale,
+or a real creator-platform integration.
 
-- Six strict, typed event families: comments, follows, gifts, likes,
-  subscriptions, and commands.
-- Six deterministic scenarios: `happy_path`, `duplicate_delivery`,
-  `invalid_payloads`, `delayed_out_of_order`, `forced_reconnect`, and
-  `reconnect_burst`.
-- A valid unique event and its delivery attempt commit before an accepted ACK
-  is sent.
-- Completing a run closes its source-ingestion boundary. New valid, invalid,
-  duplicate, or conflicting attempts cannot mutate finalized evidence.
-- Duplicate attempts remain visible as evidence but create one canonical event,
-  one successful processing effect, and one DOM element per browser session.
-- Invalid inputs receive structured NACKs, remain auditable, and never become
-  overlay effects.
-- Every ingestion socket is bound to one registered run, so malformed
-  cross-run payloads cannot contaminate another run's evidence.
-- Delayed scenarios persist a server-stamped marker before each hold and derive
-  the observed lower-bound duration from that marker to the first matching
-  delivery attempt; a delay counts only when it meets the configured hold.
-- The forced reconnect proves an accepted reply was sent for the persisted
-  target on the old transport, deliberately not observed by the client, and
-  retried as a duplicate on the distinct reconnected transport.
-- The browser sends a render acknowledgment only after inserting an element
-  carrying `data-event-id`; the API orders that acknowledgment after stored
-  successful-dispatch evidence.
-- Streamlit reads analytics through FastAPI only. FastAPI is the sole DuckDB
-  owner and writer.
+## What it tests
 
-## Architecture
+- A valid event and its delivery attempt commit before the API sends an
+  `accepted` reply.
+- Duplicate attempts remain auditable but cannot create a second canonical
+  event or processing effect.
+- One browser document inserts at most one DOM element per `event_id`, including
+  across an overlay reconnect, then sends a render ACK that the API records only
+  after successful-dispatch evidence.
+- Invalid payload rejection stays separate from transport and processing
+  failure metrics.
+- Accepted but unfinished work is recovered after restart without creating a
+  second processing effect.
+- Six deterministic scenarios cover happy path, duplicate delivery, invalid
+  payloads, delayed and out-of-order delivery, forced reconnect, and the mixed
+  `reconnect_burst` demonstration.
+
+## Failure case
+
+The reconnect scenario deliberately creates an ambiguous client view. The API
+first commits the event and attempt, then sends an `accepted` reply on the old
+WebSocket. The simulator closes that transport before reading the reply. After
+reconnecting, it retries the same `event_id`; the API records a duplicate
+attempt and returns `duplicate` instead of creating another event or effect.
+
+In the fixed-seed run, the server persisted and accepted 490 unique events while
+the simulator observed 489 `accepted` replies. The missing reply is
+an unobserved acknowledgment, not event loss: the duplicate response lets the
+client reconcile all 490 IDs, and the browser document records one visible
+effect for each canonical event.
+
+## What happened
+
+The latest checked measurement used `reconnect_burst`, seed `20250314`, on a
+local Windows 11 machine. The scenario is reproducible; the timings below are
+one local observation, not a capacity benchmark.
+
+| Stored or client evidence | Result |
+| --- | ---: |
+| Generated manifest / delivery attempts | 500 / 526 |
+| Intentionally rejected attempts | 10 (1.90% of attempts) |
+| Canonical events / duplicate attempts | 490 / 26 |
+| Server accepted-ACK sends / client-observed accepted replies | 490 / 489 |
+| Processed / dispatched / browser render-acknowledged | 490 / 490 / 490 |
+| Identity conflicts / operational ingestion failures | 0 / 0 |
+| Reconnects / bounded retries | 1 / 1 |
+| Persist-to-render p50 / p95 / p99 | 32.969 / 42.926 / 46.847 ms |
+
+The ten rejected attempts were intentionally malformed test inputs. Calling
+1.90% a generic “delivery failure rate” would misdescribe the run. The complete
+measurement profile and injection plan live in
+[SCENARIOS.md](docs/SCENARIOS.md).
+
+## What surprised me
+
+The interesting distinction was not “did an ACK exist?” but “who could prove
+they observed it?” The server had durable event evidence and evidence that the
+accepted reply was sent; the client still had one fewer accepted reply because
+the old connection disappeared before it read that message.
+
+I also found that duplicate delivery and duplicate visible effect are different
+problems. Event-ID idempotency protects canonical storage and processing, while
+the overlay still needs its own replay deduplication. Likewise, a rejected test
+payload is not a transport failure. Keeping those categories separate made the
+dashboard less flattering but much more useful.
+
+Finally, dispatch and render are not interchangeable. The API persists a
+successful dispatch before it accepts the browser's render ACK; the browser ACK
+proves DOM insertion, not physical pixels in OBS.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    S["Deterministic simulator"] -->|"WebSocket: attempts + ACK/NACK"| A["FastAPI service"]
+    S["Deterministic simulator"] -->|"attempts + ACK/NACK"| A["FastAPI service"]
     A -->|"single serialized owner"| D[("DuckDB evidence")]
     A -->|"processed effects"| O["Browser overlay"]
     O -->|"render ACK after DOM insertion"| A
     D --> A
-    A -->|"read-only analytics HTTP"| T["Streamlit dashboard"]
-    P["pytest + Playwright"] --> S
-    P --> A
-    P --> O
+    A -->|"analytics HTTP"| T["Streamlit dashboard"]
 ```
 
-The service keeps network connections in memory but derives replay and metrics
-from durable evidence. See [architecture](docs/ARCHITECTURE.md), the
-[event contract](docs/EVENT_CONTRACT.md), and the
-[reliability model](docs/RELIABILITY_MODEL.md).
+The stack is Python 3.12, FastAPI, Pydantic, DuckDB, Streamlit, vanilla
+JavaScript, pytest, Playwright, Docker Compose, and GitHub Actions. FastAPI is
+the sole DuckDB owner; the dashboard reads through analytics endpoints rather
+than opening the database itself.
 
-## Requirements
+## Run it
 
-- Python 3.12 or newer
-- Node.js only for the optional `node --check` JavaScript syntax command
-- A Playwright Chromium binary for browser tests
-- Docker Desktop with Compose for the container path
-- GNU Make is optional; every target is shown as a Python command below
-
-No credentials, tokens, real usernames, or private stream data are required.
-Make targets use `python` from the activated environment; override `PYTHON`
-only when your local interpreter command differs.
-
-## Local setup
+Requirements: Python 3.12+, a Playwright Chromium binary for browser tests,
+Node.js for the optional JavaScript syntax check, and Docker Desktop only for
+the container path. No credentials, tokens, real usernames, or private stream
+data are needed.
 
 Windows PowerShell:
 
@@ -107,196 +135,101 @@ python -m pip install -e ".[dev]"
 python -m playwright install chromium
 ```
 
-The default database is `data/streamlab.duckdb`. Override it with
-`STREAMLAB_DB_PATH`; local databases are ignored by Git.
-
-## Quick start
-
-1. Start the API in terminal one:
-
-   ```bash
-   python -m uvicorn streamlab.main:app --host 127.0.0.1 --port 8000
-   ```
-
-2. Start the dashboard in terminal two:
-
-   ```bash
-   python -m streamlit run src/streamlab/dashboard.py
-   ```
-
-3. Start the fixed-seed demonstration in terminal three:
-
-   ```bash
-   python -m streamlab.simulator --scenario reconnect_burst --seed 20250314 --count 500 --rate 1000 --burst-rate 5000 --overlay-wait 120
-   ```
-
-4. The simulator prints a run-specific overlay URL and waits. Open that local
-   URL before the 120-second timeout. Delivery starts once the browser session
-   is stored.
-
-5. Open <http://127.0.0.1:8501> and select the completed run. The overlay is
-   also available at <http://127.0.0.1:8000/overlay>; without an explicit run it
-   selects the latest run.
-
-`make run-api`, `make run-dashboard`, and `make demo` are equivalent shortcuts.
-
-## Smaller scenario commands
+Then use three terminals:
 
 ```bash
-python -m streamlab.simulator --scenario happy_path --seed 42 --count 20 --rate 50
-python -m streamlab.simulator --scenario duplicate_delivery --seed 42 --count 30 --rate 100
-python -m streamlab.simulator --scenario invalid_payloads --seed 42 --count 12 --rate 100
-python -m streamlab.simulator --scenario delayed_out_of_order --seed 42 --count 30 --rate 100
-python -m streamlab.simulator --scenario forced_reconnect --seed 42 --count 30 --rate 100
+# terminal 1: API and overlay
+python -m uvicorn streamlab.main:app --host 127.0.0.1 --port 8000
+
+# terminal 2: analytics dashboard
+python -m streamlit run src/streamlab/dashboard.py
+
+# terminal 3: fixed-seed demonstration
+python -m streamlab.simulator --scenario reconnect_burst --seed 20250314 --count 500 --rate 1000 --burst-rate 5000 --overlay-wait 120
 ```
 
-A run without a connected overlay can still prove ingestion and processing,
-but its dashboard verdict is honestly `incomplete` because no browser render
-evidence exists. Scenario details are in [SCENARIOS.md](docs/SCENARIOS.md).
+The simulator prints a run-specific overlay URL and waits for that browser
+session before sending. Open the printed URL, then inspect the completed run at
+<http://127.0.0.1:8501>. Raw API evidence is available from the dashboard's
+technical expanders and FastAPI's local docs at <http://127.0.0.1:8000/docs>.
+`make run-api`, `make run-dashboard`, and `make demo` are shortcuts.
 
-## Validation
+The default database is `data/streamlab.duckdb`; override it with
+`STREAMLAB_DB_PATH`. Local databases are ignored by Git. A separate synthetic
+[overlay capture](docs/images/overlay-demo.png) shows the browser surface.
 
-Core unit, integration, WebSocket, and dashboard checks:
+### Docker Compose
 
 ```bash
-python -m pytest
+docker compose config --quiet
+docker compose up --build --wait
+docker compose exec api python -m streamlab.simulator --scenario reconnect_burst --seed 20250314 --count 500 --rate 1000 --burst-rate 5000 --overlay-wait 120
+```
+
+The API, overlay, and dashboard use ports 8000, 8000, and 8501 respectively;
+DuckDB lives in the named `streamlab-data` volume. `docker compose down` keeps
+that evidence. Add `--volumes` only when you intentionally want to delete it.
+
+## How I verified it
+
+The default suite covers unit, integration, WebSocket, analytics, and dashboard
+behavior. The marked suites run a real Uvicorn process and Chromium browser;
+the scenario test repeats the full path with 500 generated events.
+
+```bash
+python -m pytest -q
+python -m pytest -m e2e -q
+python -m pytest -m scenario -q
 python -m ruff check .
 python -m ruff format --check .
 python -m mypy src
 python -m pip check
 node --check src/streamlab/static/overlay.js
-```
-
-Real browser and 500-event proofs are explicit markers so a clean core test run
-does not silently require a downloaded browser:
-
-```bash
-python -m pytest -m e2e
-python -m pytest -m scenario
-```
-
-`make verify` runs the core/static checks, both browser-heavy markers, and
-Compose configuration validation as one reviewer-facing gate.
-
-The Playwright vertical test starts real Uvicorn, opens real Chromium, runs the
-simulator, checks one DOM element per valid `event_id`, checks invalid IDs are
-absent, and polls the API for stored render acknowledgments. The scenario test
-repeats that proof with 500 generated events. See the full
-[testing strategy](docs/TESTING.md).
-
-## Docker Compose
-
-Build and start the API and dashboard:
-
-```bash
 docker compose config --quiet
-docker compose up --build --wait
 ```
 
-The API is at <http://127.0.0.1:8000>, the overlay at
-<http://127.0.0.1:8000/overlay>, and Streamlit at
-<http://127.0.0.1:8501>. DuckDB lives in the named `streamlab-data` volume.
-If port 8501 is already reserved, set `STREAMLAB_DASHBOARD_PORT` before `up`
-(for example `$env:STREAMLAB_DASHBOARD_PORT=8502` in PowerShell) and use that
-host port instead. The container still listens on 8501.
+The Playwright path starts the real API, opens Chromium, runs the simulator,
+checks one DOM element per valid `event_id`, verifies invalid IDs are absent,
+and polls the API for stored render acknowledgments. GitHub Actions runs these
+same proof layers on Python 3.12. `make verify` is the local reviewer-facing
+shortcut.
 
-Run a scenario inside the API container:
+## Tradeoffs
 
-```bash
-docker compose exec api python -m streamlab.simulator --scenario reconnect_burst --seed 20250314 --count 500 --rate 1000 --burst-rate 5000 --overlay-wait 120
-```
-
-Stop services while retaining evidence with `docker compose down`; add
-`--volumes` only when you intentionally want to delete the local demo database.
-
-## Measured fixed-seed demonstration
-
-Measured on 2026-07-14 on Windows 11 Home 10.0.22631 x64, Intel Core
-i9-14900K (24 cores / 32 logical processors), Python 3.12.5, and Playwright
-Chromium 149.0.7827.55. This is one local observation, not a capacity claim.
-
-| Evidence | Measured value |
-| --- | ---: |
-| Scenario / seed | `reconnect_burst` / `20250314` |
-| Configured rates | 1,000 events/s normal; 5,000 events/s burst |
-| Generated manifest | 500 |
-| Delivery attempts | 526 |
-| Valid deliveries | 516 |
-| Unique persisted / server ACK sends / processed | 490 / 490 / 490 |
-| Dispatched / browser render-acknowledged | 490 / 490 |
-| Duplicate attempts | 26 (25 planned + 1 reconnect retry) |
-| Client-observed accepted / duplicate replies | 489 / 26 |
-| Payload-rejected delivery attempts / rate | 10 / 1.90% of 526 attempts |
-| Conflicts / unrendered | 0 / 0 |
-| Reconnects / client retries | 1 / 1 |
-| Correlated reconnect target | Old reply sent but not observed; retry duplicate |
-| Planned / observed delay injections | 5 / 5 |
-| Reconnect duration | 13.934 ms |
-| Persist-to-render p50 / p95 / p99 | 27.324 / 38.565 / 42.880 ms |
-| Latency sample count | 490 |
-| Stored run duration | 13.136 s |
-| Final verdict | `pass` |
-
-The reconnect counts intentionally use two viewpoints. The server persisted and
-accepted 490 unique events, while the simulator observed 489 `accepted` replies.
-The accepted reply for the reconnect target was sent on the old transport but
-was not read before that transport closed. Its retry returned `duplicate`, so
-the client still reconciled 490 unique IDs and all 490 events were processed and
-rendered exactly once. No unique event or visible effect was lost.
-
-Runtime client results and DuckDB evidence are generated locally and
-intentionally ignored by Git. The checked-in screenshots show the same
-fixed-seed scenario's overlay and dashboard surfaces:
-
-![500-event synthetic overlay](docs/images/overlay-demo.png)
-
-## Analytics API
-
-- `GET /health`
-- `POST /api/runs`
-- `POST /api/runs/{run_id}/complete`
-- `POST /api/runs/{run_id}/connection-events` for bounded simulator fault markers
-- `GET /api/runs`
-- `GET /api/runs/latest`
-- `GET /api/runs/{run_id}/overview`
-- `GET /api/runs/{run_id}/events`
-- `GET /api/runs/{run_id}/events/{event_id}`
-- `GET /api/runs/{run_id}/performance`
-- `GET /api/runs/{run_id}/failures`
-- `WS /ws/ingest?run_id={run_id}&connection_id={optional_connection_id}`
-- `WS /ws/overlay?run_id={run_id}&session_id={session_id}`
-
-FastAPI also exposes local interactive schema documentation at
-<http://127.0.0.1:8000/docs>.
+- **DuckDB:** a compact, inspectable local evidence store that fits the demo.
+  Serializing access through the API avoids unsafe multi-process ownership, but
+  this is not a horizontally scalable database design.
+- **Streamlit:** made it practical to expose stored evidence without building a
+  frontend framework. The tradeoff is less control over layout and interaction;
+  keeping it API-only preserves the important boundary.
+- **Production:** I would separate durable processing from the API, use a store
+  designed for multiple workers, and add authentication, observability, and
+  network-level fault injection. Those changes would obscure the v0.1 learning
+  goal, so they remain out of scope.
 
 ## Honest limitations
 
-- This is a single-process local lab with one serialized DuckDB writer, not a
-  horizontally scaled service.
-- Synchronous DuckDB calls can briefly occupy the API event loop during large
-  manifest writes; the 500-event run is evidence for this demo size only.
-- Startup recovery processes every persisted-but-unprocessed event. There is
-  no separate durable worker or always-on background retry queue.
-- Forced disconnects and delivery delays are client-controlled and corroborated
-  by stored simulator/server evidence; they are not packet-level network faults.
-- The reported 1.90% is a payload-rejection rate for ten intentionally invalid
-  deliveries. v0.1 does not derive a generic transport delivery-failure rate.
-- A browser acknowledgment proves DOM insertion, not physical pixels in OBS or
-  a capture device.
-- The deterministic logical `occurred_at` timestamps are not used for runtime
-  latency. Runtime metrics use persisted evidence timestamps.
-- Dependency ranges are bounded, but the pip/setuptools workflow used by v0.1
-  has no native cross-platform lock command. Clean CI and Docker installs test
-  those bounds; exact transitive versions are not byte-for-byte reproducible.
+- This is a single-process local lab with one serialized DuckDB writer.
+- Synchronous DuckDB work can briefly occupy the API event loop during larger
+  manifest writes; the 500-event run proves only this demonstration size.
+- Startup recovery handles persisted-but-unprocessed work, but there is no
+  separate durable worker or always-on retry queue.
+- Forced disconnects and delays are deterministic simulator faults corroborated
+  by stored evidence, not packet-level network faults.
+- A browser render ACK proves DOM insertion in that browser session, not
+  physical pixels in OBS or a capture device.
+- Dependency ranges are bounded, but the pip/setuptools workflow has no
+  cross-platform lockfile; CI and Docker validate fresh installs within those
+  bounds.
 
-## Documentation
+## Technical notes
 
-- [SPEC.md](SPEC.md) - product boundary and acceptance criteria
-- [PLAN.md](PLAN.md) - implementation plan and quality priorities
 - [Architecture](docs/ARCHITECTURE.md)
 - [Event contract](docs/EVENT_CONTRACT.md)
 - [Reliability model](docs/RELIABILITY_MODEL.md)
-- [Scenarios](docs/SCENARIOS.md)
+- [Scenario definitions and full fixed-run evidence](docs/SCENARIOS.md)
 - [Testing strategy](docs/TESTING.md)
-- [DECISIONS.md](DECISIONS.md) - recorded implementation tradeoffs
-- [PROGRESS.md](PROGRESS.md) - checkpoint evidence
+- [Product boundary](SPEC.md) and [implementation plan](PLAN.md)
+- [Recorded decisions](DECISIONS.md) and [progress evidence](PROGRESS.md)
+
+Built by David Wigton as a portfolio project exploring QA automation, real-time event systems, and reliability analytics.

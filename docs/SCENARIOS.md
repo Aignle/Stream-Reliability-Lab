@@ -52,6 +52,34 @@ produces the 26th duplicate reply (25 planned plus one reconnect retry). The
 client still reconciles 490 unique IDs, and no unique event or visible effect is
 lost.
 
+### Recorded v0.1 measurement
+
+Measured on 2026-07-14 on a local Windows 11 machine with Python 3.12.5 and a
+connected synthetic browser overlay. This is one local observation, not a
+capacity claim.
+
+| Evidence | Measured value |
+| --- | ---: |
+| Scenario / seed | `reconnect_burst` / `20250314` |
+| Configured rates | 1,000 events/s normal; 5,000 events/s burst |
+| Generated manifest | 500 |
+| Delivery attempts / valid attempts | 526 / 516 |
+| Canonical events / server ACK sends / processed | 490 / 490 / 490 |
+| Dispatched / browser render-acknowledged | 490 / 490 |
+| Duplicate attempts | 26 (25 planned + 1 reconnect retry) |
+| Client-observed accepted / duplicate replies | 489 / 26 |
+| Payload-rejected attempts / rate | 10 / 1.90% of 526 attempts |
+| Identity conflicts / unrendered events | 0 / 0 |
+| Operational ingestion failures | 0 |
+| Reconnects / client retries | 1 / 1 |
+| Correlated reconnect target | Old reply sent but not observed; retry duplicate |
+| Planned / observed delay injections | 5 / 5 |
+| Reconnect marker interval | 12.255 ms |
+| Persist-to-render p50 / p95 / p99 | 32.969 / 42.926 / 46.847 ms |
+| Latency sample count | 490 |
+| Stored run duration | 14.225 s |
+| Final verdict | `pass` |
+
 Configured rates control simulator pacing; actual local throughput also includes
 network, validation, transaction, browser, and acknowledgment work. The project
 does not treat configured rates as achieved throughput.
